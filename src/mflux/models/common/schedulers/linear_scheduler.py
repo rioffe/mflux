@@ -52,4 +52,5 @@ class LinearScheduler(BaseScheduler):
 
     def step(self, noise: mx.array, timestep: int, latents: mx.array, **kwargs) -> mx.array:
         dt = self._sigmas[timestep + 1] - self._sigmas[timestep]
-        return latents + noise * dt
+        result = latents + noise * dt
+        return result.astype(latents.dtype)

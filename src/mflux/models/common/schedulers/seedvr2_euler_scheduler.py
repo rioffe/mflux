@@ -55,4 +55,4 @@ class SeedVR2EulerScheduler(BaseScheduler):
             next_sample = (1 - s_norm) * pred_x_0 + s_norm * pred_noise
         else:
             next_sample = pred_x_0
-        return next_sample
+        return next_sample.astype(latents.dtype)

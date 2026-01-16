@@ -48,12 +48,6 @@ class QwenAttention(nn.Module):
         txt_key = mx.reshape(txt_key, (txt_key.shape[0], txt_key.shape[1], self.num_heads, self.head_dim))
         txt_value = mx.reshape(txt_value, (txt_value.shape[0], txt_value.shape[1], self.num_heads, self.head_dim))
 
-        if block_idx == 0:
-            print("Operand types for img_key projection (img_modulated):", img_modulated.dtype)
-            print("Operand types for img_key projection (self.to_k.weight):", self.to_k.weight.dtype)
-            print("Operand types for txt_key projection (txt_modulated):", txt_modulated.dtype)
-            print("Operand types for txt_key projection (self.add_k_proj.weight):", self.add_k_proj.weight.dtype)
-
         if self.norm_q is not None:
             img_query = self.norm_q(img_query)
         if self.norm_k is not None:
@@ -151,6 +145,12 @@ class QwenAttention(nn.Module):
         freqs_cos = cos_vals[None, :, None, :]
         freqs_sin = sin_vals[None, :, None, :]
 
+        # Handle sequence length mismatch
+        if freqs_cos.shape[1] != x_real.shape[1]:
+            freqs_cos = freqs_cos[:, : x_real.shape[1], :, :]
+            freqs_sin = freqs_sin[:, : x_real.shape[1], :, :]
+
+        # Handle feature dimension mismatch
         if freqs_cos.shape[-1] != x_real.shape[-1]:
             freqs_cos = freqs_cos[..., : x_real.shape[-1]]
             freqs_sin = freqs_sin[..., : x_real.shape[-1]]
