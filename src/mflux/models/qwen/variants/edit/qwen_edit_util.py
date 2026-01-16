@@ -43,6 +43,8 @@ class QwenEditUtil:
                 width=calc_w,
                 tiling_config=tiling_config,
             )
+            dtype = vae.encoder.conv_in.conv3d.weight.dtype
+            input_image = input_image.astype(dtype)
 
             image_latents = QwenLatentCreator.pack_latents(
                 latents=input_image,

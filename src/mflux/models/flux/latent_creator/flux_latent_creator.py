@@ -3,10 +3,11 @@ import mlx.core as mx
 
 class FluxLatentCreator:
     @staticmethod
-    def create_noise(seed: int, height: int, width: int) -> mx.array:
+    def create_noise(seed: int, height: int, width: int, dtype: mx.Dtype = mx.float16) -> mx.array:
         return mx.random.normal(
             shape=[1, (height // 16) * (width // 16), 64],
             key=mx.random.key(seed),
+            dtype=dtype,
         )
 
     @staticmethod

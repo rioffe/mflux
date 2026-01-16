@@ -5,8 +5,8 @@ from mflux.models.flux.latent_creator.flux_latent_creator import FluxLatentCreat
 
 class QwenLatentCreator:
     @staticmethod
-    def create_noise(seed: int, height: int, width: int) -> mx.array:
-        return FluxLatentCreator.create_noise(seed, height, width)
+    def create_noise(seed: int, height: int, width: int, dtype: mx.Dtype = mx.float16) -> mx.array:
+        return FluxLatentCreator.create_noise(seed, height, width, dtype=dtype)
 
     @staticmethod
     def pack_latents(latents: mx.array, height: int, width: int, num_channels_latents: int = 16) -> mx.array:

@@ -69,10 +69,12 @@ class QwenImageEdit(nn.Module):
         time_steps = tqdm(range(len(timesteps)))
 
         # 1. Create initial latents
+        dtype = self.vae.encoder.conv_in.conv3d.weight.dtype
         latents = QwenLatentCreator.create_noise(
             seed=seed,
             width=config.width,
             height=config.height,
+            dtype=dtype,
         )
 
         # 2. Encode the prompt
@@ -202,14 +204,15 @@ class QwenImageEdit(nn.Module):
             image_grid_thw=neg_image_grid_thw,
         )
 
-        final_prompt_embeds = pos_hidden_states[0].astype(mx.float16)
-        final_prompt_mask = pos_hidden_states[1].astype(mx.float16)
+        transformer_dtype = self.transformer.img_in.weight.dtype
+        final_prompt_embeds = pos_hidden_states[0].astype(transformer_dtype)
+        final_prompt_mask = pos_hidden_states[1].astype(transformer_dtype)
 
         return (
             final_prompt_embeds,  # prompt_embeds
             final_prompt_mask,  # prompt_mask
-            neg_hidden_states[0].astype(mx.float16),  # negative_prompt_embeds
-            neg_hidden_states[1].astype(mx.float16),  # negative_prompt_mask
+            neg_hidden_states[0].astype(transformer_dtype),  # negative_prompt_embeds
+            neg_hidden_states[1].astype(transformer_dtype),  # negative_prompt_mask
         )
 
     def _compute_dimensions(

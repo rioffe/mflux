@@ -22,7 +22,8 @@ class QwenVAE(nn.Module):
     def decode(self, latents: mx.array) -> mx.array:
         if len(latents.shape) == 4:
             latents = latents.reshape(latents.shape[0], latents.shape[1], 1, latents.shape[2], latents.shape[3])
-        latents = latents * QwenVAE.LATENTS_STD + QwenVAE.LATENTS_MEAN
+        dtype = self.post_quant_conv.conv3d.weight.dtype
+        latents = latents * QwenVAE.LATENTS_STD.astype(dtype) + QwenVAE.LATENTS_MEAN.astype(dtype)
         latents = self.post_quant_conv(latents)
         decoded = self.decoder(latents)
         return decoded
@@ -33,4 +34,5 @@ class QwenVAE(nn.Module):
         latents = self.encoder(latents)
         latents = self.quant_conv(latents)
         latents = latents[:, :16, :, :, :]
-        return (latents - QwenVAE.LATENTS_MEAN) / QwenVAE.LATENTS_STD
+        dtype = self.post_quant_conv.conv3d.weight.dtype
+        return (latents - QwenVAE.LATENTS_MEAN.astype(dtype)) / QwenVAE.LATENTS_STD.astype(dtype)
