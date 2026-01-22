@@ -98,20 +98,20 @@ class QwenTransformer(nn.Module):
             if hasattr(block, 'img_ff'):
                 # Shard first FF layer (all-to-sharded)
                 # Hidden dim is split across devices
-                block.img_ff.layers[0] = shard_linear(
-                    block.img_ff.layers[0], "all-to-sharded", group=group
+                block.img_ff.mlp_in = shard_linear(
+                    block.img_ff.mlp_in, "all-to-sharded", group=group
                 )
                 # Shard second FF layer (sharded-to-all)
-                shard_inplace(block.img_ff.layers[2], "sharded-to-all", group=group)
+                shard_inplace(block.img_ff.mlp_out, "sharded-to-all", group=group)
 
             # Shard feed-forward layers for text stream
             if hasattr(block, 'txt_ff'):
                 # Shard first FF layer (all-to-sharded)
-                block.txt_ff.layers[0] = shard_linear(
-                    block.txt_ff.layers[0], "all-to-sharded", group=group
+                block.txt_ff.mlp_in = shard_linear(
+                    block.txt_ff.mlp_in, "all-to-sharded", group=group
                 )
                 # Shard second FF layer (sharded-to-all)
-                shard_inplace(block.txt_ff.layers[2], "sharded-to-all", group=group)
+                shard_inplace(block.txt_ff.mlp_out, "sharded-to-all", group=group)
 
             if idx == 0:
                 print(f"  Block 0: Divided {original_heads} attention heads into {block.attn.num_heads} per device")
