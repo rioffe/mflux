@@ -39,7 +39,15 @@ class QwenTextEncoder(nn.Module):
             # Divide attention heads across devices
             if hasattr(layer, 'self_attn'):
                 original_heads = layer.self_attn.num_attention_heads
+                original_kv_heads = layer.self_attn.num_key_value_heads
+
+                # Divide both query heads and key-value heads by N
+                # This maintains the GQA ratio (28:4 = 7:1 becomes 7:1 per device with N=4)
                 layer.self_attn.num_attention_heads //= N
+                layer.self_attn.num_key_value_heads //= N
+
+                # Update num_key_value_groups after sharding
+                layer.self_attn.num_key_value_groups = layer.self_attn.num_attention_heads // layer.self_attn.num_key_value_heads
 
                 # Shard attention projections (all-to-sharded)
                 layer.self_attn.q_proj = shard_linear(
@@ -55,6 +63,10 @@ class QwenTextEncoder(nn.Module):
                 # Shard output projection (sharded-to-all)
                 shard_inplace(layer.self_attn.o_proj, "sharded-to-all", group=group)
 
+                if idx == 0:
+                    print(f"  Layer 0: Divided {original_heads} query heads into {layer.self_attn.num_attention_heads} per device")
+                    print(f"  Layer 0: Divided {original_kv_heads} key-value heads into {layer.self_attn.num_key_value_heads} per device (GQA ratio maintained)")
+
             # Shard MLP layers
             if hasattr(layer, 'mlp'):
                 # Shard gate and up projections (all-to-sharded)
@@ -66,9 +78,6 @@ class QwenTextEncoder(nn.Module):
                 )
                 # Shard down projection (sharded-to-all)
                 shard_inplace(layer.mlp.down_proj, "sharded-to-all", group=group)
-
-            if idx == 0:
-                print(f"  Layer 0: Divided {original_heads} attention heads into {layer.self_attn.num_attention_heads} per device")
 
         print(f"[OK] Encoder sharding complete: {len(self.encoder.layers)} layers sharded")
 
