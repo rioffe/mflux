@@ -14,7 +14,7 @@ source-exclude = [
 
 [project]
 name = "mflux"
-version = "0.14.2"
+version = "0.15.4"
 description = "A MLX port of FLUX based on the Huggingface Diffusers implementation."
 readme = "README.md"
 keywords = ["diffusers", "flux", "mlx"]
@@ -23,9 +23,12 @@ maintainers = [{ name = "Filip Strand", email = "strand.filip@gmail.com" }]
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = [
+    "filelock>=3.20.1",
+    "fonttools>=4.60.2",
     "huggingface-hub>=1.1.6,<2.0",
     "matplotlib>=3.9.2,<4.0",
-    "mlx>=0.27.0,<0.31.0",
+    "mlx>=0.27.0,<0.31.0; sys_platform=='darwin'",
+    "mlx[cuda13]>=0.30.3,<0.31.0; sys_platform=='linux'",
     "numpy>=2.0.1,<3.0",
     "opencv-python>=4.10.0,<5.0",
     "piexif>=1.1.3,<2.0",
@@ -46,15 +49,18 @@ dependencies = [
     "tqdm>=4.66.5,<5.0",
     "transformers>=5.0.0rc0,<6.0",
     "twine>=6.1.0,<7.0",
+    "urllib3>=2.6.0",
 ]
 classifiers = [
     "Intended Audience :: Developers",
     "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 
 [project.optional-dependencies]
@@ -62,7 +68,8 @@ dev = [
     "matplotlib>3.10,<4.0",
     "pytest>=8.3.0,<9.0",
     "pytest-timer>=1.0,<2.0",
-    "mlx==0.29.2",
+    "mlx==0.30.3; sys_platform=='darwin'",
+    "mlx[cuda13]==0.30.3; sys_platform=='linux'",
 ]
 
 [project.urls]
@@ -70,6 +77,8 @@ homepage = "https://github.com/filipstrand/mflux"
 
 [project.scripts]
 mflux-generate = "mflux.models.flux.cli.flux_generate:main"
+mflux-generate-flux2 = "mflux.models.flux2.cli.flux2_generate:main"
+mflux-generate-flux2-edit = "mflux.models.flux2.cli.flux2_edit_generate:main"
 mflux-generate-controlnet = "mflux.models.flux.cli.flux_generate_controlnet:main"
 mflux-generate-in-context = "mflux.models.flux.cli.flux_generate_in_context_dev:main"
 mflux-generate-in-context-edit = "mflux.models.flux.cli.flux_generate_in_context_edit:main"
@@ -121,6 +130,12 @@ docstring-code-line-length = "dynamic"
 testpaths = ["tests"]
 python_files = "test_*.py"
 addopts = '-v --failed-first --showlocals --tb=long --full-trace -m "not high_memory_requirement"'
+filterwarnings = [
+    "ignore::DeprecationWarning:transformers\\.models\\.clip\\.tokenization_clip",
+    "ignore:builtin type SwigPyPacked has no __module__ attribute:DeprecationWarning",
+    "ignore:builtin type SwigPyObject has no __module__ attribute:DeprecationWarning",
+    "ignore:builtin type swigvarlink has no __module__ attribute:DeprecationWarning",
+]
 markers = [
     "fast: marks tests as fast (no image generation)",
     "slow: marks tests as slow (generates images)",

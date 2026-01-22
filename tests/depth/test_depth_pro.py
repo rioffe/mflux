@@ -1,4 +1,5 @@
 import os
+import platform
 from pathlib import Path
 
 import pytest
@@ -8,13 +9,14 @@ from mflux.utils.image_compare import ImageCompare
 
 
 class TestDepthPro:
+    @pytest.mark.skipif(platform.system() == "Linux", reason="Linux-specific MLX core library failure")
     @pytest.mark.slow
     def test_depth_pro_generation(self):
         # Resolve paths
         resource_dir = Path(__file__).parent.parent / "resources"
         input_image_path = resource_dir / "reference_controlnet_dev_lora.png"
-        reference_image_path = resource_dir / "reference_controlnet_dev_lora_depth.png"
-        output_image_path = resource_dir / "depth_output.png"
+        reference_image_path = resource_dir / "reference_depth.png"
+        output_image_path = resource_dir / "output_depth.png"
 
         try:
             # Initialize DepthPro model
