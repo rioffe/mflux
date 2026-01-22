@@ -67,8 +67,10 @@ class QwenImageEdit(nn.Module):
         )
         timesteps = config.scheduler.timesteps
 
-        # Only show progress bar on rank 0 in distributed mode
+        # Initialize distributed group once for this generation
         group = mx.distributed.init()
+
+        # Only show progress bar on rank 0 in distributed mode
         disable_progress = group.size() > 1 and group.rank() > 0
         time_steps = tqdm(range(len(timesteps)), disable=disable_progress)
 
@@ -157,7 +159,7 @@ class QwenImageEdit(nn.Module):
         ctx.after_loop(latents)
 
         # 9.5. Track and report distributed performance metrics (if applicable)
-        group = mx.distributed.init()
+        # Reuse the group initialized at the start of this method
         if group.size() > 1 and group.rank() == 0:
             # Only rank 0 prints telemetry summary
             peak_memory_gb = mx.get_peak_memory() / 1024**3
