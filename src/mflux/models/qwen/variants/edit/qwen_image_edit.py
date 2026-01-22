@@ -66,7 +66,11 @@ class QwenImageEdit(nn.Module):
             num_inference_steps=num_inference_steps,
         )
         timesteps = config.scheduler.timesteps
-        time_steps = tqdm(range(len(timesteps)))
+
+        # Only show progress bar on rank 0 in distributed mode
+        group = mx.distributed.init()
+        disable_progress = group.size() > 1 and group.rank() > 0
+        time_steps = tqdm(range(len(timesteps)), disable=disable_progress)
 
         # 1. Create initial latents
         dtype = self.vae.encoder.conv_in.conv3d.weight.dtype

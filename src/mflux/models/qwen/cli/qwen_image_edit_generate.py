@@ -17,6 +17,7 @@ def main():
     parser.add_lora_arguments()
     parser.add_image_generator_arguments(supports_metadata_config=True)
     parser.add_argument("--image-paths", type=Path, nargs="+", required=True, help="Local paths to one or more init images. For single image editing, provide one path. For multiple image editing, provide multiple paths.")  # fmt: off
+    parser.add_argument("--force-shard", action="store_true", help="Force model sharding across devices even with small batch sizes. Useful for memory-constrained scenarios.")  # fmt: off
     parser.add_output_arguments()
     args = parser.parse_args()
 
@@ -31,6 +32,38 @@ def main():
         lora_paths=args.lora_paths,
         lora_scales=args.lora_scales,
     )
+
+    # 1.5. Setup distributed processing if multiple devices available
+    import mlx.core as mx
+
+    # Initialize distributed group
+    group = mx.distributed.init()
+    should_gather = False
+    original_seed = args.seed
+
+    if group.size() > 1:
+        print(f"\n{'='*60}")
+        print(f"Distributed Processing Enabled: {group.size()} devices detected")
+        print(f"{'='*60}\n")
+
+        # Determine strategy: model sharding vs data parallelism
+        # For Qwen Image Edit, we always use model sharding since it's
+        # a single-image editing task (no batch dimension to parallelize)
+        if args.force_shard:
+            print("Strategy: FORCED MODEL SHARDING")
+            print("  → Model will be split across devices")
+            qwen.transformer.shard(group)
+        else:
+            print("Strategy: MODEL SHARDING (default for Qwen Image Edit)")
+            print("  → Model will be split across devices")
+            qwen.transformer.shard(group)
+
+        # Seed coordination for sharding: all devices use same seed
+        # Note: args.seed is a list, we'll handle coordination per seed in the loop
+        print(f"  → Using seed list: {args.seed}")
+        print()
+    else:
+        print("Single device mode - no distributed processing\n")
 
     # 2. Register callbacks
     memory_saver = CallbackManager.register_callbacks(
@@ -60,6 +93,14 @@ def main():
             # 5. Save the image
             output_path = Path(args.output.format(seed=seed))
             image.save(path=output_path, export_json_metadata=args.metadata)
+
+            # Print distributed stats for rank 0 only
+            if group.size() > 1 and group.rank() == 0:
+                print(f"\n{'='*60}")
+                print(f"Distributed Generation Complete")
+                print(f"  Devices used: {group.size()}")
+                print(f"  Seed: {seed}")
+                print(f"{'='*60}\n")
 
     except (StopImageGenerationException, PromptFileReadError) as exc:
         print(exc)

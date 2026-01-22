@@ -3,6 +3,7 @@ from __future__ import annotations
 import mlx.core as mx
 import numpy as np
 from mlx import nn
+from typing import Optional
 
 from mflux.models.common.config.config import Config
 from mflux.models.flux.model.flux_transformer.ada_layer_norm_continuous import AdaLayerNormContinuous
@@ -10,6 +11,7 @@ from mflux.models.qwen.model.qwen_transformer.qwen_rope import QwenEmbedRopeMLX
 from mflux.models.qwen.model.qwen_transformer.qwen_time_text_embed import QwenTimeTextEmbed
 from mflux.models.qwen.model.qwen_transformer.qwen_transformer_block import QwenTransformerBlock
 from mflux.models.qwen.model.qwen_transformer.qwen_transformer_rms_norm import QwenTransformerRMSNorm
+from mlx.nn.layers.distributed import shard_inplace, shard_linear
 
 
 class QwenTransformer(nn.Module):
@@ -33,6 +35,88 @@ class QwenTransformer(nn.Module):
         self.transformer_blocks = [QwenTransformerBlock(dim=self.inner_dim, num_heads=num_attention_heads, head_dim=attention_head_dim) for i in range(num_layers)]  # fmt: off
         self.norm_out = AdaLayerNormContinuous(self.inner_dim, self.inner_dim)
         self.proj_out = nn.Linear(self.inner_dim, patch_size * patch_size * out_channels)
+
+    def shard(self, group: Optional[mx.distributed.Group] = None):
+        """
+        Shard the transformer across multiple devices for tensor parallelism.
+
+        This method splits attention heads and MLP dimensions across devices,
+        with communication collectives (all_sum) to combine results.
+
+        Args:
+            group: The distributed group to shard across. If None, will initialize
+                   a new group.
+        """
+        group = group or mx.distributed.init()
+        N = group.size()
+
+        # No sharding needed for single device
+        if N == 1:
+            return
+
+        print(f"Sharding QwenTransformer across {N} devices...")
+
+        for idx, block in enumerate(self.transformer_blocks):
+            # Set the sharding group reference
+            block.sharding_group = group
+
+            # Divide attention heads across devices
+            # Original: 24 heads, sharded: 24/N heads per device
+            if hasattr(block, 'attn'):
+                original_heads = block.attn.num_heads
+                block.attn.num_heads //= N
+
+                # Shard image stream attention projections (all-to-sharded)
+                # Each device computes a subset of attention heads
+                block.attn.to_q = shard_linear(
+                    block.attn.to_q, "all-to-sharded", group=group
+                )
+                block.attn.to_k = shard_linear(
+                    block.attn.to_k, "all-to-sharded", group=group
+                )
+                block.attn.to_v = shard_linear(
+                    block.attn.to_v, "all-to-sharded", group=group
+                )
+
+                # Shard text stream attention projections (all-to-sharded)
+                block.attn.add_q_proj = shard_linear(
+                    block.attn.add_q_proj, "all-to-sharded", group=group
+                )
+                block.attn.add_k_proj = shard_linear(
+                    block.attn.add_k_proj, "all-to-sharded", group=group
+                )
+                block.attn.add_v_proj = shard_linear(
+                    block.attn.add_v_proj, "all-to-sharded", group=group
+                )
+
+                # Shard attention output projections (sharded-to-all)
+                # These layers receive sharded inputs and produce full outputs
+                shard_inplace(block.attn.attn_to_out[0], "sharded-to-all", group=group)
+                shard_inplace(block.attn.to_add_out, "sharded-to-all", group=group)
+
+            # Shard feed-forward layers for image stream
+            if hasattr(block, 'img_ff'):
+                # Shard first FF layer (all-to-sharded)
+                # Hidden dim is split across devices
+                block.img_ff.layers[0] = shard_linear(
+                    block.img_ff.layers[0], "all-to-sharded", group=group
+                )
+                # Shard second FF layer (sharded-to-all)
+                shard_inplace(block.img_ff.layers[2], "sharded-to-all", group=group)
+
+            # Shard feed-forward layers for text stream
+            if hasattr(block, 'txt_ff'):
+                # Shard first FF layer (all-to-sharded)
+                block.txt_ff.layers[0] = shard_linear(
+                    block.txt_ff.layers[0], "all-to-sharded", group=group
+                )
+                # Shard second FF layer (sharded-to-all)
+                shard_inplace(block.txt_ff.layers[2], "sharded-to-all", group=group)
+
+            if idx == 0:
+                print(f"  Block 0: Divided {original_heads} attention heads into {block.attn.num_heads} per device")
+
+        print(f"[OK] Sharding complete: {len(self.transformer_blocks)} blocks sharded")
 
     def __call__(
         self,

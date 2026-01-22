@@ -11,6 +11,8 @@ class QwenTransformerBlock(nn.Module):
     def __init__(self, dim: int = 3072, num_heads: int = 24, head_dim: int = 128):
         super().__init__()
 
+        self.sharding_group = None
+
         self.img_mod_silu = nn.SiLU()
         self.img_mod_linear = nn.Linear(dim, 6 * dim, bias=True)
         self.img_norm1 = nn.LayerNorm(dims=dim, eps=1e-6, affine=False)
@@ -53,6 +55,20 @@ class QwenTransformerBlock(nn.Module):
             block_idx=block_idx,
         )
 
+        # All-reduce after attention (combine partial results from all devices)
+        if self.sharding_group is not None:
+            # Concatenate text and image attention outputs
+            txt_seq_len = txt_attn_output.shape[1]
+            joint_attn = mx.concatenate([txt_attn_output, img_attn_output], axis=1)
+
+            # All-sum across devices
+            joint_attn = mx.distributed.all_sum(joint_attn, group=self.sharding_group)
+
+            # Split back into text and image
+            txt_attn_output, img_attn_output = mx.split(
+                joint_attn, [txt_seq_len], axis=1
+            )
+
         hidden_states = hidden_states + img_gate1 * img_attn_output
         encoder_hidden_states = encoder_hidden_states + txt_gate1 * txt_attn_output
 
@@ -61,11 +77,25 @@ class QwenTransformerBlock(nn.Module):
 
         img_mlp_output = self.img_ff(img_modulated2)
 
-        hidden_states = hidden_states + img_gate2 * img_mlp_output
-
         txt_normed2 = self.txt_norm2(encoder_hidden_states)
         txt_modulated2, txt_gate2 = QwenTransformerBlock._modulate(txt_normed2, txt_mod2)
         txt_mlp_output = self.txt_ff(txt_modulated2)
+
+        # All-reduce after MLP (combine partial results from all devices)
+        if self.sharding_group is not None:
+            # Concatenate text and image MLP outputs
+            txt_seq_len = txt_mlp_output.shape[1]
+            joint_mlp = mx.concatenate([txt_mlp_output, img_mlp_output], axis=1)
+
+            # All-sum across devices
+            joint_mlp = mx.distributed.all_sum(joint_mlp, group=self.sharding_group)
+
+            # Split back into text and image
+            txt_mlp_output, img_mlp_output = mx.split(
+                joint_mlp, [txt_seq_len], axis=1
+            )
+
+        hidden_states = hidden_states + img_gate2 * img_mlp_output
         encoder_hidden_states = encoder_hidden_states + txt_gate2 * txt_mlp_output
 
         return encoder_hidden_states, hidden_states
