@@ -18,6 +18,7 @@ class QwenEncoderLayer(nn.Module):
         rope_theta: float = 1000000.0,
     ):
         super().__init__()
+        self.sharding_group = None  # For distributed processing
         self.input_layernorm = QwenRMSNorm(hidden_size, eps=rms_norm_eps)
         self.self_attn = QwenAttention(
             hidden_size=hidden_size,
@@ -46,9 +47,19 @@ class QwenEncoderLayer(nn.Module):
             attention_mask=attention_mask,
             position_embeddings=position_embeddings,
         )
+
+        # All-reduce after attention (combine partial results from all devices)
+        if self.sharding_group is not None:
+            hidden_states = mx.distributed.all_sum(hidden_states, group=self.sharding_group)
+
         hidden_states = residual + hidden_states
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
+
+        # All-reduce after MLP (combine partial results from all devices)
+        if self.sharding_group is not None:
+            hidden_states = mx.distributed.all_sum(hidden_states, group=self.sharding_group)
+
         hidden_states = residual + hidden_states
         return hidden_states
