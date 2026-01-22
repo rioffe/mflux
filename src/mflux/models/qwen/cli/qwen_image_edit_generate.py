@@ -18,6 +18,7 @@ def main():
     parser.add_image_generator_arguments(supports_metadata_config=True)
     parser.add_argument("--image-paths", type=Path, nargs="+", required=True, help="Local paths to one or more init images. For single image editing, provide one path. For multiple image editing, provide multiple paths.")  # fmt: off
     parser.add_argument("--force-shard", action="store_true", help="Force model sharding across devices even with small batch sizes. Useful for memory-constrained scenarios.")  # fmt: off
+    parser.add_argument("--shard-encoder", action="store_true", help="Also shard the 7B vision-language encoder across devices. Further reduces memory usage (experimental).")  # fmt: off
     parser.add_output_arguments()
     args = parser.parse_args()
 
@@ -57,6 +58,11 @@ def main():
             print("Strategy: MODEL SHARDING (default for Qwen Image Edit)")
             print("  → Model will be split across devices")
             qwen.transformer.shard(group)
+
+        # Optionally shard the vision-language encoder (7B params)
+        if args.shard_encoder:
+            print("  → Also sharding vision-language encoder (7B params)")
+            qwen.text_encoder.shard(group)
 
         # Seed coordination for sharding: all devices use same seed
         # Note: args.seed is a list, we'll handle coordination per seed in the loop

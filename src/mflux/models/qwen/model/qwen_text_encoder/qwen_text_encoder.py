@@ -1,13 +1,76 @@
 import mlx.core as mx
 from mlx import nn
+from typing import Optional
 
 from mflux.models.qwen.model.qwen_text_encoder.qwen_encoder import QwenEncoder
+from mlx.nn.layers.distributed import shard_inplace, shard_linear
 
 
 class QwenTextEncoder(nn.Module):
     def __init__(self):
         super().__init__()
         self.encoder = QwenEncoder()
+
+    def shard(self, group: Optional[mx.distributed.Group] = None):
+        """
+        Shard the 7B vision-language encoder across multiple devices.
+
+        This is an optional optimization for very memory-constrained scenarios.
+        The encoder has 28 transformer layers with 28 attention heads each.
+
+        Args:
+            group: The distributed group to shard across. If None, will initialize
+                   a new group.
+        """
+        group = group or mx.distributed.init()
+        N = group.size()
+
+        # No sharding needed for single device
+        if N == 1:
+            return
+
+        print(f"Sharding QwenTextEncoder (7B) across {N} devices...")
+
+        # Shard each encoder layer
+        for idx, layer in enumerate(self.encoder.layers):
+            # Set sharding group reference for potential communication
+            layer.sharding_group = group
+
+            # Divide attention heads across devices
+            if hasattr(layer, 'self_attn'):
+                original_heads = layer.self_attn.num_attention_heads
+                layer.self_attn.num_attention_heads //= N
+
+                # Shard attention projections (all-to-sharded)
+                layer.self_attn.q_proj = shard_linear(
+                    layer.self_attn.q_proj, "all-to-sharded", group=group
+                )
+                layer.self_attn.k_proj = shard_linear(
+                    layer.self_attn.k_proj, "all-to-sharded", group=group
+                )
+                layer.self_attn.v_proj = shard_linear(
+                    layer.self_attn.v_proj, "all-to-sharded", group=group
+                )
+
+                # Shard output projection (sharded-to-all)
+                shard_inplace(layer.self_attn.o_proj, "sharded-to-all", group=group)
+
+            # Shard MLP layers
+            if hasattr(layer, 'mlp'):
+                # Shard gate and up projections (all-to-sharded)
+                layer.mlp.gate_proj = shard_linear(
+                    layer.mlp.gate_proj, "all-to-sharded", group=group
+                )
+                layer.mlp.up_proj = shard_linear(
+                    layer.mlp.up_proj, "all-to-sharded", group=group
+                )
+                # Shard down projection (sharded-to-all)
+                shard_inplace(layer.mlp.down_proj, "sharded-to-all", group=group)
+
+            if idx == 0:
+                print(f"  Layer 0: Divided {original_heads} attention heads into {layer.self_attn.num_attention_heads} per device")
+
+        print(f"[OK] Encoder sharding complete: {len(self.encoder.layers)} layers sharded")
 
     def __call__(
         self,

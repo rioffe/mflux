@@ -156,6 +156,23 @@ class QwenImageEdit(nn.Module):
         # 9. Call subscribers after loop
         ctx.after_loop(latents)
 
+        # 9.5. Track and report distributed performance metrics (if applicable)
+        group = mx.distributed.init()
+        if group.size() > 1 and group.rank() == 0:
+            # Only rank 0 prints telemetry summary
+            peak_memory_gb = mx.get_peak_memory() / 1024**3
+            generation_time = time_steps.format_dict.get("elapsed", 0)
+
+            print(f"\n{'='*60}")
+            print(f"Distributed Generation Metrics (Rank 0)")
+            print(f"{'='*60}")
+            print(f"  Devices used: {group.size()}")
+            print(f"  Peak memory (this device): {peak_memory_gb:.2f} GB")
+            print(f"  Generation time: {generation_time:.2f}s")
+            print(f"  Steps: {len(timesteps)}")
+            print(f"  Time per step: {generation_time/len(timesteps):.2f}s")
+            print(f"{'='*60}\n")
+
         # 10. Decode the latent array and return the image
         latents = QwenLatentCreator.unpack_latents(latents=latents, height=config.height, width=config.width)
         decoded = VAEUtil.decode(vae=self.vae, latent=latents, tiling_config=self.tiling_config)
