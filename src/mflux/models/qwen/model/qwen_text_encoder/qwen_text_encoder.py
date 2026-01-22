@@ -49,6 +49,10 @@ class QwenTextEncoder(nn.Module):
                 # Update num_key_value_groups after sharding
                 layer.self_attn.num_key_value_groups = layer.self_attn.num_attention_heads // layer.self_attn.num_key_value_heads
 
+                # CRITICAL: Also divide hidden_size since it's used in reshape operations
+                # After sharding, the actual tensor dimension is hidden_size/N
+                layer.self_attn.hidden_size //= N
+
                 # Shard attention projections (all-to-sharded)
                 layer.self_attn.q_proj = shard_linear(
                     layer.self_attn.q_proj, "all-to-sharded", group=group
