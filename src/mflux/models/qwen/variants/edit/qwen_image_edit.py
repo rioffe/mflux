@@ -284,88 +284,69 @@ class QwenImageEdit(nn.Module):
         This enables the workflow: Load → Shard → Quantize
         which is necessary for quantization + distributed sharding to work together.
 
-        The quantization is applied to:
-        - transformer (main diffusion model)
-        - text_encoder (7B vision-language encoder)
+        For sharded models, uses per-layer quantization with adaptive group_size
+        to handle Qwen's irregular dimensions (e.g., 3420 → 855 after 4-way sharding).
 
-        VAE is skipped as it's typically not quantized in diffusion models.
-
-        For sharded models, uses a smaller group_size to ensure compatibility
-        with sharded dimensions. For non-sharded models, uses MLX's default
-        group_size behavior (which handles irregular dimensions automatically).
+        MLX supports group_sizes: 32, 64, 128
+        - Most layers can use these standard sizes
+        - Layers with incompatible dimensions are skipped with a warning
         """
         if self._deferred_quantize is None:
             return
 
         from mflux.models.qwen.weights.qwen_weight_definition import QwenWeightDefinition
 
-        # Determine if we need custom group_size handling for sharded models
         group = mx.distributed.init()
         num_devices = group.size()
 
         if num_devices > 1:
-            # For sharded models, need to be careful with group_size
-            # After sharding, some dimensions (like 3420 → 855 for 4 devices)
-            # are not divisible by standard power-of-2 group sizes
-            # Try progressively smaller group_sizes until one works
-            group_sizes_to_try = [
-                max(8, 64 // num_devices),  # Calculated: 16 for 4 devices, 32 for 2, etc.
-                8,   # Fallback 1
-                4,   # Fallback 2
-                1,   # Always works (no grouping)
-            ]
+            # Sharded models: per-layer quantization with adaptive group_size
+            print(f"\nApplying {self._deferred_quantize}-bit quantization with per-layer group_size selection...")
 
-            last_error = None
-            for i, group_size in enumerate(group_sizes_to_try):
-                try:
-                    if i == 0:
-                        print(f"\nApplying {self._deferred_quantize}-bit quantization (group_size={group_size})...")
+            quantized_count = 0
+            skipped_count = 0
+            skipped_layers = []
+
+            # Quantize transformer
+            for name, module in self.transformer.named_modules():
+                if QwenWeightDefinition.quantization_predicate(name, module):
+                    group_size = self._find_compatible_group_size(module)
+                    if group_size is not None:
+                        module.to_quantized(bits=self._deferred_quantize, group_size=group_size)
+                        quantized_count += 1
                     else:
-                        print(f"Retrying with group_size={group_size}...")
+                        skipped_layers.append(f"transformer.{name}")
+                        skipped_count += 1
 
-                    # Quantize transformer
-                    nn.quantize(
-                        self.transformer,
-                        class_predicate=QwenWeightDefinition.quantization_predicate,
-                        bits=self._deferred_quantize,
-                        group_size=group_size,
-                    )
-
-                    # Quantize text encoder
-                    nn.quantize(
-                        self.text_encoder,
-                        class_predicate=QwenWeightDefinition.quantization_predicate,
-                        bits=self._deferred_quantize,
-                        group_size=group_size,
-                    )
-
-                    # Success! Update the bits attribute and exit
-                    self.bits = self._deferred_quantize
-                    print(f"[OK] Quantization complete: {self._deferred_quantize}-bit (group_size={group_size})\n")
-                    return
-
-                except ValueError as e:
-                    # This group_size didn't work, try the next one
-                    if "needs to be divisible by the quantization group size" in str(e):
-                        last_error = e
-                        if group_size == group_sizes_to_try[-1]:
-                            # This was the last option, re-raise
-                            print(f"\n[ERROR] All group sizes failed. Last error:")
-                            raise
-                        # Otherwise continue to next group_size
-                        continue
+            # Quantize text encoder
+            for name, module in self.text_encoder.named_modules():
+                if QwenWeightDefinition.quantization_predicate(name, module):
+                    group_size = self._find_compatible_group_size(module)
+                    if group_size is not None:
+                        module.to_quantized(bits=self._deferred_quantize, group_size=group_size)
+                        quantized_count += 1
                     else:
-                        # Different error, re-raise immediately
-                        raise
+                        skipped_layers.append(f"text_encoder.{name}")
+                        skipped_count += 1
 
-            # If we get here, all group_sizes failed
-            if last_error:
-                raise last_error
+            # Update the bits attribute
+            self.bits = self._deferred_quantize
+
+            print(f"[OK] Quantization complete: {self._deferred_quantize}-bit")
+            print(f"  Quantized: {quantized_count} layers")
+            if skipped_count > 0:
+                print(f"  Skipped: {skipped_count} layers (incompatible dimensions)")
+                if skipped_count <= 5:
+                    for layer in skipped_layers:
+                        print(f"    - {layer}")
+                else:
+                    print(f"    (showing first 5 of {skipped_count})")
+                    for layer in skipped_layers[:5]:
+                        print(f"    - {layer}")
+            print()
 
         else:
             # Single device: use default MLX behavior (no group_size specified)
-            # This matches the original WeightApplier behavior and handles
-            # irregular dimensions like 3420 automatically
             print(f"\nApplying {self._deferred_quantize}-bit quantization...")
 
             # Quantize transformer (using MLX defaults)
@@ -385,4 +366,28 @@ class QwenImageEdit(nn.Module):
             # Update the bits attribute
             self.bits = self._deferred_quantize
             print(f"[OK] Quantization complete: {self._deferred_quantize}-bit\n")
+
+    def _find_compatible_group_size(self, module: nn.Module) -> int | None:
+        """
+        Find a compatible group_size for quantizing a Linear layer.
+
+        MLX supports group_sizes: 32, 64, 128
+        Tries them in descending order (larger = better compression).
+
+        Returns:
+            Compatible group_size, or None if layer can't be quantized
+        """
+        if not isinstance(module, nn.Linear):
+            return None
+
+        # Get the output dimension (last dimension of weight)
+        output_dim = module.weight.shape[0]
+
+        # Try supported group_sizes in descending order (larger = better compression)
+        for group_size in [128, 64, 32]:
+            if output_dim % group_size == 0:
+                return group_size
+
+        # No compatible group_size found
+        return None
 
