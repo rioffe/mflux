@@ -32,11 +32,15 @@ class QwenImageEdit(nn.Module):
         lora_paths: list[str] | None = None,
         lora_scales: list[float] | None = None,
         model_config: ModelConfig = ModelConfig.qwen_image_edit(),
+        defer_quantize: bool = False,
     ):
         super().__init__()
+        # Store deferred quantization level for later application
+        self._deferred_quantize = quantize if defer_quantize else None
+
         QwenImageInitializer.init_edit(
             model=self,
-            quantize=quantize,
+            quantize=None if defer_quantize else quantize,
             model_path=model_path,
             lora_paths=lora_paths,
             lora_scales=lora_scales,
@@ -272,3 +276,43 @@ class QwenImageEdit(nn.Module):
         vae_height = round(vae_height / 32) * 32
 
         return config, int(vl_width), int(vl_height), int(vae_width), int(vae_height)
+
+    def apply_deferred_quantization(self) -> None:
+        """
+        Apply quantization to the model after it has been sharded.
+
+        This enables the workflow: Load → Shard → Quantize
+        which is necessary for quantization + distributed sharding to work together.
+
+        The quantization is applied to:
+        - transformer (main diffusion model)
+        - text_encoder (7B vision-language encoder)
+
+        VAE is skipped as it's typically not quantized in diffusion models.
+        """
+        if self._deferred_quantize is None:
+            return
+
+        from mflux.models.qwen.weights.qwen_weight_definition import QwenWeightDefinition
+
+        print(f"\nApplying {self._deferred_quantize}-bit quantization to sharded model...")
+
+        # Quantize transformer
+        nn.quantize(
+            self.transformer,
+            class_predicate=QwenWeightDefinition.quantization_predicate,
+            bits=self._deferred_quantize,
+        )
+
+        # Quantize text encoder
+        nn.quantize(
+            self.text_encoder,
+            class_predicate=QwenWeightDefinition.quantization_predicate,
+            bits=self._deferred_quantize,
+        )
+
+        # Update the bits attribute to reflect quantization
+        self.bits = self._deferred_quantize
+
+        print(f"[OK] Quantization complete: {self._deferred_quantize}-bit\n")
+

@@ -25,37 +25,23 @@ def main():
     if args.guidance is None:
         args.guidance = ui_defaults.GUIDANCE_SCALE_KONTEXT
 
-    # 1. Load the model
+    # 1. Initialize distributed group early to determine strategy
+    import mlx.core as mx
+    group = mx.distributed.init()
+    defer_quantize = group.size() > 1 and args.quantize is not None
+
+    # 2. Load the model (defer quantization if we'll shard first)
     qwen = QwenImageEdit(
         quantize=args.quantize,
         model_path=args.model_path,
         lora_paths=args.lora_paths,
         lora_scales=args.lora_scales,
+        defer_quantize=defer_quantize,
     )
 
-    # 1.5. Setup distributed processing if multiple devices available
-    import mlx.core as mx
-
-    # Initialize distributed group
-    group = mx.distributed.init()
+    # 3. Setup distributed processing if multiple devices available
     should_gather = False
     original_seed = args.seed
-
-    # Check for incompatible options
-    if group.size() > 1 and args.quantize is not None:
-        print("\n" + "="*60)
-        print("ERROR: Quantization + Distributed Processing Incompatible")
-        print("="*60)
-        print("\nQuantization converts layers to QuantizedLinear, which cannot")
-        print("be sharded using MLX's distributed primitives.")
-        print("\nOptions:")
-        print("  1. Run without quantization (remove --quantize flag)")
-        print("  2. Run on single device (distributed will auto-disable)")
-        print("\nNote: Distributed sharding already reduces memory usage")
-        print("significantly, so quantization is often not needed.")
-        print("="*60 + "\n")
-        import sys
-        sys.exit(1)
 
     if group.size() > 1:
         print(f"\n{'='*60}")
@@ -74,6 +60,11 @@ def main():
             print("  → Model will be split across devices")
             qwen.transformer.shard(group)
 
+        # Apply deferred quantization AFTER sharding
+        if defer_quantize:
+            print(f"  → Applying {args.quantize}-bit quantization after sharding")
+            qwen.apply_deferred_quantization()
+
         # Seed coordination for sharding: all devices use same seed
         # Note: args.seed is a list, we'll handle coordination per seed in the loop
         print(f"  → Using seed list: {args.seed}")
@@ -81,7 +72,7 @@ def main():
     else:
         print("Single device mode - no distributed processing\n")
 
-    # 2. Register callbacks
+    # 4. Register callbacks
     memory_saver = CallbackManager.register_callbacks(
         args=args,
         model=qwen,
