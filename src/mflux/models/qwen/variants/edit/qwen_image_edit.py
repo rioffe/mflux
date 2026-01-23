@@ -289,30 +289,80 @@ class QwenImageEdit(nn.Module):
         - text_encoder (7B vision-language encoder)
 
         VAE is skipped as it's typically not quantized in diffusion models.
+
+        For sharded models, uses a smaller group_size to ensure compatibility
+        with sharded dimensions (which may not be divisible by default 64).
+        Falls back to smaller group_sizes if needed.
         """
         if self._deferred_quantize is None:
             return
 
         from mflux.models.qwen.weights.qwen_weight_definition import QwenWeightDefinition
 
-        print(f"\nApplying {self._deferred_quantize}-bit quantization to sharded model...")
+        # Calculate appropriate group_size for sharded models
+        # After sharding, dimensions are divided by num_devices
+        # We need group_size to divide the sharded dimensions
+        group = mx.distributed.init()
+        num_devices = group.size()
 
-        # Quantize transformer
-        nn.quantize(
-            self.transformer,
-            class_predicate=QwenWeightDefinition.quantization_predicate,
-            bits=self._deferred_quantize,
-        )
+        if num_devices > 1:
+            # Try progressively smaller group_sizes for sharded models
+            # Some Qwen dimensions (like 3420 → 855 for 4 devices) don't divide evenly
+            # by powers of 2, so we try multiple options
+            group_sizes_to_try = [
+                max(8, 64 // num_devices),  # Calculated: 16 for 4 devices, 32 for 2, etc.
+                8,   # Fallback 1
+                4,   # Fallback 2
+                1,   # Always works (no grouping)
+            ]
+        else:
+            # Standard group_size for non-sharded models
+            group_sizes_to_try = [64]
 
-        # Quantize text encoder
-        nn.quantize(
-            self.text_encoder,
-            class_predicate=QwenWeightDefinition.quantization_predicate,
-            bits=self._deferred_quantize,
-        )
+        last_error = None
+        for i, group_size in enumerate(group_sizes_to_try):
+            try:
+                if i == 0:
+                    print(f"\nApplying {self._deferred_quantize}-bit quantization (group_size={group_size})...")
+                else:
+                    print(f"Retrying with group_size={group_size}...")
 
-        # Update the bits attribute to reflect quantization
-        self.bits = self._deferred_quantize
+                # Quantize transformer
+                nn.quantize(
+                    self.transformer,
+                    class_predicate=QwenWeightDefinition.quantization_predicate,
+                    bits=self._deferred_quantize,
+                    group_size=group_size,
+                )
 
-        print(f"[OK] Quantization complete: {self._deferred_quantize}-bit\n")
+                # Quantize text encoder
+                nn.quantize(
+                    self.text_encoder,
+                    class_predicate=QwenWeightDefinition.quantization_predicate,
+                    bits=self._deferred_quantize,
+                    group_size=group_size,
+                )
+
+                # Success! Update the bits attribute and exit
+                self.bits = self._deferred_quantize
+                print(f"[OK] Quantization complete: {self._deferred_quantize}-bit (group_size={group_size})\n")
+                return
+
+            except ValueError as e:
+                # This group_size didn't work, try the next one
+                if "needs to be divisible by the quantization group size" in str(e):
+                    last_error = e
+                    if group_size == group_sizes_to_try[-1]:
+                        # This was the last option, re-raise
+                        print(f"\n[ERROR] All group sizes failed. Last error:")
+                        raise
+                    # Otherwise continue to next group_size
+                    continue
+                else:
+                    # Different error, re-raise immediately
+                    raise
+
+        # If we get here, all group_sizes failed
+        if last_error:
+            raise last_error
 
