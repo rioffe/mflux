@@ -374,18 +374,22 @@ class QwenImageEdit(nn.Module):
         MLX supports group_sizes: 32, 64, 128
         Tries them in descending order (larger = better compression).
 
+        The INPUT dimension (last dimension of weight matrix) must be
+        divisible by the group_size.
+
         Returns:
             Compatible group_size, or None if layer can't be quantized
         """
         if not isinstance(module, nn.Linear):
             return None
 
-        # Get the output dimension (last dimension of weight)
-        output_dim = module.weight.shape[0]
+        # Get the INPUT dimension (last dimension of weight matrix)
+        # Weight shape is (output_dim, input_dim)
+        input_dim = module.weight.shape[-1]
 
         # Try supported group_sizes in descending order (larger = better compression)
         for group_size in [128, 64, 32]:
-            if output_dim % group_size == 0:
+            if input_dim % group_size == 0:
                 return group_size
 
         # No compatible group_size found
