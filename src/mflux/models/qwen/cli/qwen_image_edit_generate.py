@@ -41,6 +41,22 @@ def main():
     should_gather = False
     original_seed = args.seed
 
+    # Check for incompatible options
+    if group.size() > 1 and args.quantize is not None:
+        print("\n" + "="*60)
+        print("ERROR: Quantization + Distributed Processing Incompatible")
+        print("="*60)
+        print("\nQuantization converts layers to QuantizedLinear, which cannot")
+        print("be sharded using MLX's distributed primitives.")
+        print("\nOptions:")
+        print("  1. Run without quantization (remove --quantize flag)")
+        print("  2. Run on single device (distributed will auto-disable)")
+        print("\nNote: Distributed sharding already reduces memory usage")
+        print("significantly, so quantization is often not needed.")
+        print("="*60 + "\n")
+        import sys
+        sys.exit(1)
+
     if group.size() > 1:
         print(f"\n{'='*60}")
         print(f"Distributed Processing Enabled: {group.size()} devices detected")
