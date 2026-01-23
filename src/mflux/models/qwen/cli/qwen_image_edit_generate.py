@@ -28,15 +28,39 @@ def main():
     # 1. Initialize distributed group early to determine strategy
     import mlx.core as mx
     group = mx.distributed.init()
-    defer_quantize = group.size() > 1 and args.quantize is not None
 
-    # 2. Load the model (defer quantization if we'll shard first)
+    # Check for incompatible configuration
+    # Quantization after sharding doesn't work because to_quantized() creates
+    # new QuantizedLinear layers that lose sharding metadata, causing deadlock
+    if group.size() > 1 and args.quantize is not None:
+        print("\n" + "="*60)
+        print("ERROR: Quantization + Distributed Sharding Not Supported")
+        print("="*60)
+        print("\nMLX limitation: Quantization replaces sharded Linear layers")
+        print("with QuantizedLinear layers that don't preserve distributed")
+        print("metadata, causing inference to deadlock.")
+        print("\nOptions:")
+        print("  1. Use distributed sharding WITHOUT quantization")
+        print("     → Memory savings: ~40-50%")
+        print("     → Works perfectly, no deadlock")
+        print()
+        print("  2. Use quantization on SINGLE device")
+        print("     → Memory savings: ~20-30% (depending on bit level)")
+        print("     → Works perfectly")
+        print()
+        print("Recommendation: Distributed sharding provides better memory")
+        print("savings than quantization and works reliably. Use sharding")
+        print("for multi-device runs, quantization for single-device runs.")
+        print("="*60 + "\n")
+        import sys
+        sys.exit(1)
+
+    # 2. Load the model (quantize only for single device)
     qwen = QwenImageEdit(
-        quantize=args.quantize,
+        quantize=args.quantize if group.size() == 1 else None,
         model_path=args.model_path,
         lora_paths=args.lora_paths,
         lora_scales=args.lora_scales,
-        defer_quantize=defer_quantize,
     )
 
     # 3. Setup distributed processing if multiple devices available
@@ -59,11 +83,6 @@ def main():
             print("Strategy: MODEL SHARDING (default for Qwen Image Edit)")
             print("  → Model will be split across devices")
             qwen.transformer.shard(group)
-
-        # Apply deferred quantization AFTER sharding
-        if defer_quantize:
-            print(f"  → Applying {args.quantize}-bit quantization after sharding")
-            qwen.apply_deferred_quantization()
 
         # Seed coordination for sharding: all devices use same seed
         # Note: args.seed is a list, we'll handle coordination per seed in the loop
