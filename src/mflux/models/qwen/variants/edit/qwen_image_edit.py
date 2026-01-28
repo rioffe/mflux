@@ -1,4 +1,5 @@
 import math
+import time
 from pathlib import Path
 
 import mlx.core as mx
@@ -56,6 +57,9 @@ class QwenImageEdit(nn.Module):
         scheduler: str = "linear",
         negative_prompt: str | None = None,
     ) -> GeneratedImage:
+        # Start total timing
+        total_start = time.time()
+
         config, vl_width, vl_height, vae_width, vae_height = self._compute_dimensions(
             width=width,
             height=height,
@@ -71,6 +75,15 @@ class QwenImageEdit(nn.Module):
         group = mx.distributed.init()
         disable_progress = group.size() > 1 and group.rank() > 0
         time_steps = tqdm(range(len(timesteps)), disable=disable_progress)
+
+        # Initialize timing stats
+        timing_stats = {
+            "vae_encode_time": 0.0,
+            "diffusion_step_times": [],
+            "total_diffusion_time": 0.0,
+            "vae_decode_time": 0.0,
+            "total_time": 0.0,
+        }
 
         # 1. Create initial latents
         dtype = self.vae.encoder.conv_in.conv3d.weight.dtype
@@ -91,7 +104,8 @@ class QwenImageEdit(nn.Module):
             negative_prompt=negative_prompt,
         )
 
-        # 3. Generate image conditioning latents
+        # 3. Generate image conditioning latents (VAE encode)
+        vae_encode_start = time.time()
         static_image_latents, qwen_image_ids, cond_h_patches, cond_w_patches, num_images = (
             QwenEditUtil.create_image_conditioning_latents(
                 vae=self.vae,
@@ -103,12 +117,19 @@ class QwenImageEdit(nn.Module):
                 tiling_config=self.tiling_config,
             )
         )
+        # Ensure VAE encoding completes before measuring time
+        mx.eval(static_image_latents)
+        timing_stats["vae_encode_time"] = time.time() - vae_encode_start
 
         # 4. Create callback context and call before_loop
         ctx = self.callbacks.start(seed=seed, prompt=prompt, config=config)
         ctx.before_loop(latents)
 
+        # Start diffusion timing
+        diffusion_start = time.time()
+
         for t in time_steps:
+            step_start = time.time()
             try:
                 # 5.t Concatenate the updated latents with the static image latents
                 hidden_states = mx.concatenate([latents, static_image_latents], axis=1)
@@ -149,16 +170,35 @@ class QwenImageEdit(nn.Module):
                 # (Optional) Evaluate to enable progress tracking
                 mx.eval(latents)
 
+                # Record step time
+                step_time = time.time() - step_start
+                timing_stats["diffusion_step_times"].append(step_time)
+
             except KeyboardInterrupt:  # noqa: PERF203
                 ctx.interruption(t, latents, time_steps=time_steps)
                 raise StopImageGenerationException(f"Stopping image generation at step {t + 1}/{len(timesteps)}")
 
+        # Record total diffusion time
+        timing_stats["total_diffusion_time"] = time.time() - diffusion_start
+
         # 9. Call subscribers after loop
         ctx.after_loop(latents)
 
-        # 10. Decode the latent array and return the image
+        # 10. Decode the latent array and return the image (VAE decode)
+        vae_decode_start = time.time()
         latents = QwenLatentCreator.unpack_latents(latents=latents, height=config.height, width=config.width)
         decoded = VAEUtil.decode(vae=self.vae, latent=latents, tiling_config=self.tiling_config)
+        # Ensure VAE decoding completes before measuring time
+        mx.eval(decoded)
+        timing_stats["vae_decode_time"] = time.time() - vae_decode_start
+
+        # Calculate total time
+        timing_stats["total_time"] = time.time() - total_start
+
+        # Print timing statistics (only on rank 0 in distributed mode)
+        if not disable_progress:
+            self._print_timing_stats(timing_stats, group.size())
+
         return ImageUtil.to_image(
             decoded_latents=decoded,
             config=config,
@@ -272,3 +312,31 @@ class QwenImageEdit(nn.Module):
         vae_height = round(vae_height / 32) * 32
 
         return config, int(vl_width), int(vl_height), int(vae_width), int(vae_height)
+
+    def _print_timing_stats(self, timing_stats: dict, num_devices: int) -> None:
+        """Print detailed timing statistics for the generation process."""
+        print(f"\n{'=' * 60}")
+        if num_devices > 1:
+            print(f"Performance Statistics (Distributed Mode - {num_devices} devices)")
+        else:
+            print("Performance Statistics (Serial Mode)")
+        print(f"{'=' * 60}")
+
+        # Print overall statistics
+        print(f"VAE encode time:              {timing_stats['vae_encode_time']:.2f} s")
+        print(f"Total diffusion time:         {timing_stats['total_diffusion_time']:.2f} s")
+
+        # Calculate average step time
+        step_times = timing_stats["diffusion_step_times"]
+        if step_times:
+            avg_step_time = sum(step_times) / len(step_times)
+            print(f"Time per diffusion step:      {avg_step_time:.2f} s (avg)")
+
+            # Print individual step times
+            print("\nIndividual step times:")
+            for i, step_time in enumerate(step_times, 1):
+                print(f"  Step {i:2d}: {step_time:.2f} s")
+
+        print(f"\nVAE decode time:              {timing_stats['vae_decode_time']:.2f} s")
+        print(f"Total time:                   {timing_stats['total_time']:.2f} s")
+        print(f"{'=' * 60}\n")
